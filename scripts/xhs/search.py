@@ -205,9 +205,12 @@ def search_feeds(
     page.wait_for_load()
     page.wait_dom_stable()
 
-    is_rednote = "rednote.com" in BASE_DOMAIN
-
-    # 等待 __INITIAL_STATE__ 初始化（rednote.com 上它可能存在却不含标题，见下方回退）
+    # Wait until __INITIAL_STATE__.search.feeds is HYDRATED (entries carry a
+    # title). On rednote.com the state object appears early with id-only feeds
+    # and fills in titles + xsec_token a beat later; extracting before then is
+    # what produced empty titles. Preferring the hydrated state also gives each
+    # feed its xsec_token, which get_feed_detail needs and the search DOM no
+    # longer exposes.
     _wait_for_initial_state(page)
 
     # 应用筛选条件
@@ -216,12 +219,9 @@ def search_feeds(
         if internal_filters:
             _apply_filters(page, internal_filters)
 
-    # 提取搜索结果。rednote.com 是客户端渲染：__INITIAL_STATE__.search.feeds 现在可能
-    # 存在但只有 id、没有标题/作者，所以优先从渲染后的 DOM（section.note-item）抓取；
-    # xiaohongshu.com 仍优先 __INITIAL_STATE__。
-    result = None
-    if not is_rednote:
-        result = page.evaluate(_EXTRACT_SEARCH_JS)
+    # 提取搜索结果：优先 __INITIAL_STATE__（含标题与 xsec_token），失败再从渲染后的
+    # DOM（section.note-item）抓取（DOM 无 token，仅作兜底）。
+    result = page.evaluate(_EXTRACT_SEARCH_JS)
     if not result or _titled_feed_count(result) == 0:
         logger.info("__INITIAL_STATE__ 无可用标题，回退到 DOM 提取（section.note-item）...")
         _wait_for_search_cards(page)
@@ -262,31 +262,37 @@ def _wait_for_search_cards(page: Page, timeout: float = 20.0) -> None:
         time.sleep(1.0)
 
 
+_FEEDS_HYDRATED_JS = """
+(() => {
+    const s = window.__INITIAL_STATE__ && window.__INITIAL_STATE__.search;
+    if (!s || s.feeds === undefined) return -1;                 // no search state yet
+    const f = s.feeds;
+    const arr = (f && (f.value !== undefined ? f.value : f._value)) || [];
+    if (!arr.length) return 0;                                  // shell, no feeds
+    const titled = arr.filter(x => x && x.noteCard && (x.noteCard.displayTitle || '').trim()).length;
+    return titled;                                              // >0 once hydrated
+})()
+"""
+
+
 def _wait_for_initial_state(page: Page, timeout: float = 30.0) -> None:
-    """等待 __INITIAL_STATE__ 就绪。rednote.com 反爬更强，加载更慢。"""
+    """等待 __INITIAL_STATE__.search.feeds 就绪并 *水合*（feed 带上标题）。
+
+    rednote.com 上 state 对象会先以「只有 id」的形态出现，标题与 xsec_token 稍后填充；
+    只等 `.search` 存在会过早提取到空标题。等到「带标题的 feed 数」不再增长为止，
+    这样提取才同时拿到标题和 xsec_token。"""
     deadline = time.monotonic() + timeout
-    last_state = None
+    last_titled = -1
     while time.monotonic() < deadline:
-        ready = page.evaluate("window.__INITIAL_STATE__ !== undefined")
-        if ready:
-            # 确认 search.feeds 也存在（rednote 有时 __INITIAL_STATE__ 存在但 search 未注入）
-            has_search = page.evaluate(
-                "window.__INITIAL_STATE__ && window.__INITIAL_STATE__.search !== undefined"
-            )
-            if has_search:
-                return
-            if last_state is None:
-                # 获取顶层 key 用于诊断
-                try:
-                    keys = page.evaluate(
-                        "Object.keys(window.__INITIAL_STATE__ || {}).join(',')"
-                    )
-                    logger.info("__INITIAL_STATE__ keys: %s", keys)
-                except Exception:
-                    pass
-            last_state = "no_search"
+        try:
+            titled = int(page.evaluate(_FEEDS_HYDRATED_JS))
+        except Exception:
+            titled = -1
+        if titled > 0 and titled == last_titled:
+            return  # hydrated and stable
+        last_titled = titled
         time.sleep(0.5)
-    logger.warning("等待 __INITIAL_STATE__ 超时 (last_state=%s)", last_state)
+    logger.warning("等待 __INITIAL_STATE__ 水合超时 (titled=%s)", last_titled)
 
 
 def _apply_filters(page: Page, filters: list[tuple[int, int]]) -> None:

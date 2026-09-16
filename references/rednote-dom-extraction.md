@@ -20,17 +20,21 @@ rednote.com 的 Vue scoped 属性哈希会随发版变化（已见 `data-v-48322
 卡片先以骨架出现、标题稍后填充。只等 `section.note-item` 数量稳定会抓到空标题；应等到
 **标题非空的卡片数**不再增长（见 `search.py` 的 `_wait_for_search_cards`）。
 
-## __INITIAL_STATE__ 现在"有壳无肉"
+## __INITIAL_STATE__ 会"先有壳、后水合"——要等，别急着抓
 
-rednote.com 的 `window.__INITIAL_STATE__.search.feeds` 现在**可能存在但只有 id、没有标题/作者**。
-所以在 rednote 上应**优先 DOM 提取**（`search.py` 用 `BASE_DOMAIN` 判断），只有 DOM 提取不出
-标题时才退回 `__INITIAL_STATE__`。
+rednote.com 的 `window.__INITIAL_STATE__.search.feeds` 会**先以只有 id 的形态出现，标题、作者、
+点赞、`xsecToken` 稍后才填充**。过早提取就会拿到空标题（这正是"搜索失败"的根因，不是 SSR 缺失）。
+正确做法：**等到"带标题的 feed 数"稳定**（`search.py` 的 `_wait_for_initial_state` / `_FEEDS_HYDRATED_JS`），
+然后直接用 `_EXTRACT_SEARCH_JS` 从 `__INITIAL_STATE__` 提取——这样能**同时拿到标题、点赞和
+`xsec_token`**。DOM 提取（`section.note-item`）仅作兜底，且**不含 token**。
 
-## 笔记详情（get_feed_detail）仍未适配
+## 笔记详情（get_feed_detail）——已可用
 
 详情页需要 `xsec_token`（直接 `navigate('/explore/{id}')` 或 `/search_result/{id}` 会 404 到
-`/404?source=/404/sec_...`）。而新版搜索结果的 href 已不含 token。后续方案：**点击卡片**（SPA 内跳转，
-由前端带上 token）而非按 URL 跳转，然后从详情页 DOM 提取标题/正文/评论。
+`/404?source=/404/sec_...`）。新版搜索**结果 href 不含 token**，但**水合后的 `__INITIAL_STATE__`
+每条 feed 都带 `xsecToken`**。因此只要搜索按上面的方式提取，`get_feed_detail(feed_id, xsec_token)`
+就能正常打开详情页，返回 `{note:{title,desc,user,interactInfo,imageList}, comments:[...]}`，正文与评论齐全，
+无需改 `feed_detail.py`。（若某处只有 feed_id 没有 token，后备方案是从搜索页点击该卡片，让 SPA 带上 token。）
 
 ## 历史：旧搜索页 DOM 结构（data-v-4832212a 时代，供参考）
 
